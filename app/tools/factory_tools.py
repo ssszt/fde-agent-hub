@@ -40,5 +40,16 @@ def create_work_order(device_id: str, reason: str, priority: str="NORMAL") -> Di
         "message": f"工单 {order_id} 已成功分发至现场值班工程师"
     }
 
+def send_sms_alert(phone: str, message: str) -> None:
+    """
+    模拟发送短信通知用户。
+    
+    参数:
+        phone: 用户手机号
+        message: 要发送的短信内容
+    """
+    # 模拟短信发送动作
+    print(f"发送短信到 {phone}，内容为 {message}")
+    return None
 # 将工具注册为一个全局列表供大模型绑定使用
-AVAILABLE_TOOLS = [get_device_telemetry, create_work_order]
+AVAILABLE_TOOLS = [get_device_telemetry, create_work_order, send_sms_alert]

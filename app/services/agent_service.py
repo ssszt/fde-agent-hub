@@ -1,7 +1,7 @@
 import json
 from google.genai import types
 from app.core.config  import ai_client
-from app.tools.factory_tools import create_work_order
+from app.tools.factory_tools import create_work_order, send_sms_alert
 from app.schemas.agent_schema import ToolExecutionTrace
 from db_tools import query_device_history
 
@@ -50,9 +50,28 @@ tool_create_work_order = types.FunctionDeclaration(
     )
 )
 
+# 声明发送告警短信工具
+tool_send_sms_alert = types.FunctionDeclaration(
+    name="send_sms_alert",
+    description="发送短信告警通知到指定手机号，用于通知用户设备异常或工单状态更新。",
+    parameters = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "phone": types.Schema(
+                type=types.Type.STRING,
+                description="用户手机号，例如 '13800000000'"
+            ),
+            "message": types.Schema(
+                type=types.Type.STRING,
+                description="要发送的短信内容"
+            )
+        },
+        required=["phone", "message"]
+    )
+)
 # 仅打包当前已有的这一个工具
 factory_tools = types.Tool(
-    function_declarations=[tool_query_device_history, tool_create_work_order]
+    function_declarations=[tool_query_device_history, tool_create_work_order, tool_send_sms_alert]
 )
 class FactoryAgentService:
     @staticmethod
@@ -64,6 +83,8 @@ class FactoryAgentService:
                 "你是一个工业物联网现场交付工程师助手(FDE Agent)。"
                 "当用户提及设备排查时，你必须先调用 get_device_telemetry 获取真实指标。"
                 "若指标超出阈值（如温度高于85度或有故障码），必须调用 create_work_order 派发工单。"
+                "若工单创建成功，必须调用 send_sms_alert 发送短信告警通知。"
+                "若工单创建失败，必须调用 send_sms_alert 发送短信告警通知。"
                 "最终根据拿到的所有数据输出结构清晰的排查结论。"
             ),
             tools=[factory_tools],
@@ -157,6 +178,16 @@ class FactoryAgentService:
                         types.Part.from_function_response(
                             name=call_name,
                             response={"result": order_result}
+                        )
+                    )
+                elif call_name == "send_sms_alert":
+                    phone = call_args.get("phone")
+                    message = call_args.get("message")
+                    send_sms_alert(phone, message)
+                    tool_responses.append(
+                        types.Part.from_function_response(
+                            name=call_name,
+                            response={"result": f"短信已发送到 {phone}，内容为 {message}"}
                         )
                     )
                 # 将这轮的工具执行结果作为下一轮输入，送入 chat 进行二轮自主推理！
