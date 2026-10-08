@@ -1,7 +1,7 @@
 import json
 from google.genai import types
 from app.core.config  import ai_client
-from app.tools.factory_tools import AVAILABLE_TOOLS
+from app.tools.factory_tools import create_work_order
 from app.schemas.agent_schema import ToolExecutionTrace
 from db_tools import query_device_history
 
@@ -25,9 +25,34 @@ tool_query_device_history = types.FunctionDeclaration(
         required=["device_id"]
     )
 )
+# 声明派单工具：工单系统闭环
+tool_create_work_order = types.FunctionDeclaration(
+    name="create_work_order",
+    description="在企业工单系统/MES中为异常设备创建维修维保紧急工单。当设备历史运行温度持续高于85°C或存在严重故障状态(如CRITICAL_FAULT)时，必须调用该工具自动派单。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "device_id": types.Schema(
+                type=types.Type.STRING,
+                description="故障设备编号,例如 'DEV-003'"
+            ),
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="故障原因或异常指标描述"
+            ),
+            "priority": types.Schema(
+                type=types.Type.STRING,
+                description="工单优先级，可选值为 'NORMAL', 'HIGH', 'EMERGENCY'",
+                enum=["NORMAL", "HIGH", "EMERGENCY"]
+            )
+        },
+        required=["device_id", "reason"]
+    )
+)
+
 # 仅打包当前已有的这一个工具
 factory_tools = types.Tool(
-    function_declarations=[tool_query_device_history]
+    function_declarations=[tool_query_device_history, tool_create_work_order]
 )
 class FactoryAgentService:
     @staticmethod
@@ -59,38 +84,82 @@ class FactoryAgentService:
         #                 output="Executed by runtime"
         #             ))
         # return response.text, traces
-        response_stream = await chat.send_message_stream(user_prompt)
-        async for chunk in response_stream:
-            # 阶段1 拦截模型发出的工具调用指令（告诉前端正在执行什么动作）
-            if chunk.function_calls:
-                for call in chunk.function_calls:
-                    call_name = call.name
-                    call_args = dict(call.args)
-                    tool_event_payload = json.dumps({
-                        "tool_name": call_name,
-                        "arguments": call_args
+
+        # 循环控制：设置 max_turns 熔断保护，防止模型陷入死循环（WLB 保障）
+        max_turns = 5
+        turn = 0
+        current_input:Any = user_prompt
+        while turn < max_turns:
+            turn += 1
+            response_stream = await chat.send_message_stream(current_input)
+            pending_tool_calls = []
+            async for chunk in response_stream:
+                # 拦截模型提出的所有工具调用意图
+                if chunk.function_calls:
+                    for call in chunk.function_calls:
+                        call_name = call.name
+                        call_args = dict(call.args)
+                        pending_tool_calls.append((call_name, call_args))
+                        # SSE 实时通知前端：升起对应的底层调度雷达卡片
+                        tool_event_payload = json.dumps({
+                            "tool_name": call_name,
+                            "arguments": call_args
+                        },ensure_ascii=False)
+                        yield f"event: tool_call\ndata: {tool_event_payload}\n\n"
+                # 拦截普通分析文本，流式推送打字机效果
+                text_val = ''
+                try:
+                    text_val = chunk.text
+                except Exception:
+                    pass
+                if text_val:
+                    data = json.dumps({"text": text_val},ensure_ascii=False)
+                    yield f"event: delta\ndata: {data}\n\n"
+                # 如果这一轮流式结束后，模型没有发起任何工具调用，说明思考和输出完全结束，退出循环
+            if not pending_tool_calls:
+                break
+            # 阶段 3（核心突破）：本地执行物理操作，并将真实结果打包回填给 Gemini 大脑！
+            tool_responses = []
+            for call_name, call_args in pending_tool_calls:
+                if call_name == "query_device_history":
+                    device_id = call_args.get("device_id")
+                    limit = int(call_args.get("limit", 5))
+                    db_result_str = query_device_history(device_id=device_id, limit=limit)
+                    print("👉 [1. 大脑向我提出了调用需求]:", call_name, call_args)
+                    print("👉 [2. 本地真实查库查到了结果]:", db_result_str)
+                    print("👉 [3. 我把结果打包回填给了大脑]")
+
+                    # 将查出的数据推给前端，用于挂载时序趋势图
+                    data_payload = json.dumps({
+                        "text": f"\n\n**【数据库真实追溯结果】**\n```json\n{db_result_str}\n```\n\n"
                     },ensure_ascii=False)
-                    yield f"event: tool_call\ndata: {tool_event_payload}\n\n"
-                    # 执行真实本地sqllite穿透查询
-                    if call_name == "query_device_history":
-                        device_id = call_args.get("device_id")
-                        limit = call_args.get("limit", 5)
-                        db_result_str = query_device_history(device_id=device_id, limit=limit)
-                        # 将查出的原始 JSON 数据直接追加推给前端
-                        data_payload = json.dumps({
-                            "text": f"\n\n**【数据库真实追溯结果】**\n```json\n{db_result_str}\n```\n\n"
-                        }, ensure_ascii=False)
-                        yield f"event: delta\ndata: {data_payload}\n\n"
-                    # data = json.dumps({"tool_name": fc.name,"arguments": dict(fc.args)})
-                    # yield f"event: tool_call\ndata:{data}\n\n"
-            #阶段2 拦截模型的最终分析文本（告诉前端模型在说什么， 实现打字机效果）
-            text_val = ""
-            try:
-                text_val = chunk.text
-            except:
-                pass
-            if text_val:
-                data = json.dumps({"text": text_val},ensure_ascii=False)
-                yield f"event: delta\ndata: {data}\n\n"
+                    yield f"event: delta\ndata: {data_payload}\n\n"
+
+                    # 格式化并构建 FunctionResponse 回传包
+                    try:
+                        res_dict = json.loads(db_result_str)
+                    except Exception:
+                        res_dict = {"raw": db_result_str}
+                    tool_responses.append(
+                        types.Part.from_function_response(
+                            name=call_name,
+                            response={"result": res_dict}
+                        )
+                    )
+                elif call_name == "create_work_order":
+                    device_id = call_args.get("device_id")
+                    reason = call_args.get("reason", "设备运行温度超标")
+                    priority = call_args.get("priority", "EMERGENCY")
+
+                    order_result = create_work_order(device_id=device_id, reason=reason, priority=priority)
+                    # 构建派单回执的FunctionResponse回传包
+                    tool_responses.append(
+                        types.Part.from_function_response(
+                            name=call_name,
+                            response={"result": order_result}
+                        )
+                    )
+                # 将这轮的工具执行结果作为下一轮输入，送入 chat 进行二轮自主推理！
+            current_input = tool_responses
             
      

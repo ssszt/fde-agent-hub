@@ -33,7 +33,7 @@ def create_work_order(device_id: str, reason: str, priority: str="NORMAL") -> Di
 
     return {
         "order_id": order_id,
-        device_id: device_id,
+        "device_id": device_id,
         "status": "DISPATCHED",
         "priority": priority,
         "reason": reason,
