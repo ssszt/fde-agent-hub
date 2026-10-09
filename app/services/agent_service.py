@@ -1,7 +1,7 @@
 import json
 from google.genai import types
 from app.core.config  import ai_client
-from app.tools.factory_tools import create_work_order, send_sms_alert
+from app.tools.factory_tools import create_work_order, send_sms_alert, search_maintenance_sop
 from app.schemas.agent_schema import ToolExecutionTrace
 from db_tools import query_device_history
 
@@ -69,9 +69,29 @@ tool_send_sms_alert = types.FunctionDeclaration(
         required=["phone", "message"]
     )
 )
+
+#声明维保规程知识库检索工具 (RAG 核心工具)
+tool_search_maintenance_sop = types.FunctionDeclaration(
+    name="search_maintenance_sop",
+    description="在企业私有知识库中检索指定设备的维保标准作业规程(SOP)、应急排查处置步骤与根因分析手册。当设备发生异常或严重故障时，必须调用该工具查询精准排查指南。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "device_id": types.Schema(
+                type=types.Type.STRING,
+                description="故障设备编号，例如 'DEV-003'"
+            ),
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="检索关键词或故障现象，例如 '高温超标应急排查' 或 'CRITICAL_FAULT'"
+            )
+        },
+        required=["device_id"]
+    )
+)
 # 仅打包当前已有的这一个工具
 factory_tools = types.Tool(
-    function_declarations=[tool_query_device_history, tool_create_work_order, tool_send_sms_alert]
+    function_declarations=[tool_query_device_history, tool_create_work_order, tool_send_sms_alert, tool_search_maintenance_sop]
 )
 class FactoryAgentService:
     @staticmethod
@@ -80,12 +100,13 @@ class FactoryAgentService:
         # 将python函数提供给模型作为tools
         config = types.GenerateContentConfig(
             system_instruction=(
-                "你是一个工业物联网现场交付工程师助手(FDE Agent)。"
-                "当用户提及设备排查时，你必须先调用 get_device_telemetry 获取真实指标。"
-                "若指标超出阈值（如温度高于85度或有故障码），必须调用 create_work_order 派发工单。"
-                "若工单创建成功，必须调用 send_sms_alert 发送短信告警通知。"
-                "若工单创建失败，必须调用 send_sms_alert 发送短信告警通知。"
-                "最终根据拿到的所有数据输出结构清晰的排查结论。"
+                "你是一个工业物联网现场交付工程师专家助手(FDE Agent)。\n"
+                "【标准排查作业闭环流程】：\n"
+                "1. 当用户要求排查设备时，必须先调用 query_device_history 查询设备的近期历史遥测数据。\n"
+                "2. 获得历史数据后，仔细检查：若设备温度高于 85°C 或存在 CRITICAL_FAULT，你必须立即调用 search_maintenance_sop 查询该设备专属的维保应急标准作业规程(SOP)。\n"
+                "3. 充分研读 SOP 内容后，调用 create_work_order 派发紧急工单(EMERGENCY)，工单的 reason 中必须概括 SOP 指出的根本原因与处置方向。\n"
+                "4. 工单创建成功后，调用 send_sms_alert 向车间主管（手机号 '13800000000'）发送紧急短信通知。\n"
+                "5. 最终输出结构严谨的排查终局报告：必须详细罗列 SOP 规程中的具体排查步骤（如阀门编号、工具规格）、安全警告以及已创建的工单号与短信回执。"
             ),
             tools=[factory_tools],
             temperature=0.2,
@@ -188,6 +209,16 @@ class FactoryAgentService:
                         types.Part.from_function_response(
                             name=call_name,
                             response={"result": f"短信已发送到 {phone}，内容为 {message}"}
+                        )
+                    )
+                elif call_name == "search_maintenance_sop":
+                    device_id = call_args.get("device_id")
+                    query = call_args.get("query", "高温故障排查")
+                    sop_result = search_maintenance_sop(device_id=device_id, query=query)
+                    tool_responses.append(
+                        types.Part.from_function_response(
+                            name=call_name,
+                            response={"result": sop_result}
                         )
                     )
                 # 将这轮的工具执行结果作为下一轮输入，送入 chat 进行二轮自主推理！
