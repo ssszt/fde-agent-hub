@@ -93,9 +93,35 @@ tool_search_maintenance_sop = types.FunctionDeclaration(
 factory_tools = types.Tool(
     function_declarations=[tool_query_device_history, tool_create_work_order, tool_send_sms_alert, tool_search_maintenance_sop]
 )
+
+# 全局会话记忆池、基于 session_id 缓存各会话的活跃 Chat 实例
+SESSION_CHATS: dict[str, any] = {}
+
 class FactoryAgentService:
     @staticmethod
-    async def run_dispatch_loop(user_prompt:str) -> tuple[str, list[ToolExecutionTrace]]:
+    def get_or_create_chat(session_id):
+        if session_id not in SESSION_CHATS:
+            config=types.GenerateContentConfig(
+                system_instruction = (
+                    "你是一个工业物联网现场交付工程师专家助手（FDE Agent）。 \n"
+                    "【标准排查作业闭环流程】\n"
+                    "1.当用户要求排查设备时，必须先调用 query_device_history 查询设备的近期历史遥测数据。\n"
+                    "2.获得历史数据后，仔细检查：若设备温度高于85°C或存在CRITICAL_FAULT， 你必须立即调用 search_maintenance_sop 查询该设备专属的维保应急标准作业规程（SOP）。 \n"
+                    "3.充分研读SOP内容后，调用 create_work_order 派发紧急工单（EMERGENCY），工单的reason中必须概括SOP指出的根本原因与处置方向。 \n"
+                    "4.工单创建成功后，调用 send_sms_alert 向车间主管（手机号13800000000）发送紧急短信通知。\n"
+                    "5.最终输出结构严谨的排查终局报告：必须详细罗列 SOP 规程中的具体排查步骤(如阀门编号、 工具规格)、安全警告以及创建的工单号与短信回执。\n"
+                    "6.【上下文连续记忆规则】：当用户进行连续多轮询问（如询问上轮工单号、对比两台设备状态等）时，请结合历史对话上下文作答：若用户的问题无需再次查库或派单，直接基于上文记忆给出解答。"
+
+                ),
+                tools=[factory_tools],
+                temperature=0.2,
+            )
+            SESSION_CHATS[session_id] = ai_client.aio.chats.create(
+                model="gemini-2.5-flash", config=config
+            )
+        return SESSION_CHATS[session_id]
+    @staticmethod
+    async def run_dispatch_loop(user_prompt:str, session_id:str = "default_session") -> tuple[str, list[ToolExecutionTrace]]:
         traces: list[ToolExecutionTrace] = []
         # 将python函数提供给模型作为tools
         config = types.GenerateContentConfig(
@@ -112,7 +138,10 @@ class FactoryAgentService:
             temperature=0.2,
         )
         # 使用sdk的chats模块维持会话上下文
-        chat = ai_client.aio.chats.create(model="gemini-2.5-flash", config=config)
+        # chat = ai_client.aio.chats.create(model="gemini-2.5-flash", config=config)
+        # 不再每次都新建chat，而是从会话池中取出该session的活跃chat
+        chat = FactoryAgentService.get_or_create_chat(session_id)
+
         # 发送请求，sdk会在底层自动处理工具调用并回填结果
         # response = await chat.send_message(user_prompt)
         # history = chat.get_history()
@@ -224,4 +253,4 @@ class FactoryAgentService:
                 # 将这轮的工具执行结果作为下一轮输入，送入 chat 进行二轮自主推理！
             current_input = tool_responses
             
-     
+    

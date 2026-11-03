@@ -21,8 +21,9 @@ async def dispatch_agent_task(req:AgentTaskRequest):
 @router.post("/dispatch/stream")
 async def dispatch_agent_task_stream(res: AgentTaskRequest):
     try:
+        session_id = res.session_id or "default_session"
         return StreamingResponse(
-            FactoryAgentService.run_dispatch_loop(res.prompt),
+            FactoryAgentService.run_dispatch_loop(res.prompt, session_id=session_id),
             media_type="text/event-stream"
         )
     except Exception as e:
