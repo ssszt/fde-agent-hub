@@ -1,36 +1,70 @@
+import json
+import random
 from typing import Dict, Any
+from google.genai import types
 
-def get_device_telemetry(device_id: str) -> Dict[str, Any]:
+from db_tools import query_device_history
+from app.tools.registry import register_tool, ToolResult
+# ==========================================
+# 工具 1：物理时序遥测查库工具 (适配层)
+# ==========================================
+@register_tool(
+    name="query_device_history", # 给 Gemini 大脑识别的唯一契约名（与 Prompt 对齐）
+    description="查询指定设备的历史运行温度、时间戳和状态记录，用于排查设备故障趋势或历史异常。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "device_id": types.Schema(
+                type=types.Type.STRING,
+                description="设备唯一编号，例如 'DEV-001', 'DEV-003'"
+            )
+        },
+        required=["device_id"]
+    )
+)
+def query_device_history_tool(device_id: str, limit: int=5) -> ToolResult:
     """
-    根据设备ID查询车间设备的实时遥测数据和传感器指标。
-    
-    参数:
-        device_id: 设备唯一编号，例如 'DEV-001', 'DEV-003'
+    智能体适配工具：调用 db_tools 中的底层纯函数，封装 Generative UI 标记并返回 ToolResult
     """
-    # 模拟真实工业设备数据库查询
-    mock_db = {
-        "DEV-001": {"status": "NORMAL", "temperature": 42.1, "pressure": 4.5, "error_code": None},
-        "DEV-003": {"status": "CRITICAL_FAULT", "temperature": 96.8, "pressure": 13.2, "error_code": "E-401"},
-    }
-
-    return mock_db.get(
-        device_id,
-        {"status": "UNKNOWN", "temperature": 0.0, "pressure": 0.0, "error_code": "DEVICE_NOT_FOUND"}
+    db_result_str = query_device_history(device_id=device_id, limit=limit)
+    try:
+        res_dict = json.loads(db_result_str)
+    except Exception:
+        res_dict = {"raw": db_result_str}
+    # 封装前端暗黑时序看板所需的 Markdown/JSON 标记
+    display_payload = f"\n\n**【数据库真实追溯结果】**\n```json\n{db_result_str}\n```\n\n"
+    return ToolResult(
+        result_data=res_dict,
+        display_text=display_payload
     )
 
-def create_work_order(device_id: str, reason: str, priority: str="NORMAL") -> Dict[str, Any]:
-    """
-    在企业工单系统/MES中创建设备维修维保工单。
-    
-    参数:
-        device_id: 故障设备编号
-        reason: 故障原因或异常指标描述
-        priority: 工单优先级，可选值为 'NORMAL', 'HIGH', 'EMERGENCY'
-    """
-    # 模拟工单落库与派发动作
-    import random
+# ==========================================
+# 工具 2：MES/工单系统紧急派单工具
+# ==========================================
+@register_tool(
+    name="create_work_order",
+    description="在企业工单系统/MES中为异常设备创建维修维保紧急工单。当设备历史运行温度持续高于85°C或存在严重故障状态(如CRITICAL_FAULT)时，必须调用该工具自动派单。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "device_id": types.Schema(
+                type=types.Type.STRING,
+                description="故障设备编号，例如'DEV-003'"
+            ),
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="故障原因或异常指标描述"
+            ),
+            "priority": types.Schema(
+                type=types.Type.STRING,
+                description="工单优先级，可选值为 'NORMAL', 'HIGH', 'EMERGENCY'"
+            )
+        },
+        required=["device_id", "reason"]
+    )
+)
+def create_work_order(device_id: str, reason: str, priority: str="EMERGENCY") -> Dict[str, Any]:
     order_id = f"WO-20261003-{random.randint(100, 999)}"
-
     return {
         "order_id": order_id,
         "device_id": device_id,
@@ -39,22 +73,38 @@ def create_work_order(device_id: str, reason: str, priority: str="NORMAL") -> Di
         "reason": reason,
         "message": f"工单 {order_id} 已成功分发至现场值班工程师"
     }
-
-def send_sms_alert(phone: str, message: str) -> None:
-    """
-    模拟发送短信通知用户。
-    
-    参数:
-        phone: 用户手机号
-        message: 要发送的短信内容
-    """
-    # 模拟短信发送动作
-    print(f"发送短信到 {phone}，内容为 {message}")
-    return None
-
-
 # ==========================================
-# 企业私有维保知识库 (SOP 知识库)
+# 工具 3：现场运维短信告警工具
+# ==========================================
+@register_tool(
+    name="send_sms_alert",
+    description="发送短信告警通知到指定手机号，用于通知用户设备异常或工单状态更新。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "phone": types.Schema(
+                type=types.Type.STRING,
+                description="用户手机号"
+            ),
+            "message": types.Schema(
+                type=types.Type.STRING,
+                description="要发送的短信内容"
+            )
+        },
+        required=["phone", "message"]
+    )
+)
+def send_sms_alert(phone: str, message: str) -> Dict[str, Any]:
+    # 💥 【混沌注入】：模拟第三方短信网关突发连接重置崩溃！
+    # raise ConnectionResetError("电信运营商 SMS 网关报 503 临时熔断，Socket 连接被重置！")
+    print(f"发送短信到 {phone}，内容为 {message}")
+    return {
+        "status": "SENT",
+        "phone": phone,
+        "receipt": f"发送短信到 {phone}，内容为 {message},回执确认通过"
+    }
+# ==========================================
+# 工具 4：企业私有维保 SOP 知识库检索工具 (RAG)
 # ==========================================
 SOP_KNOWLEDGE_BASE = {
     "DEV-003": [
@@ -87,10 +137,25 @@ SOP_KNOWLEDGE_BASE = {
     ]
 }
 
+@register_tool(
+    name="search_maintenance_sop",
+    description="在企业私有知识库中检索指定设备的维保标准作业规程(SOP)、应急排查处置步骤与根因分析手册。当设备发生异常或严重故障时，必须调用该工具查询精准排查指南。",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "device_id": types.Schema(
+                type=types.Type.STRING,
+                description="故障设备编号，例如 'DEV-003'"
+            ),
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="检索关键词或故障现象，例如 '高温超标应急排查' 或 'CRITICAL_FAULT'"
+            )
+        },
+        required=["device_id"]
+    )
+)
 def search_maintenance_sop(device_id: str, query: str = "") -> Dict[str, Any]:
-    """
-    在企业私有 SOP 知识库中根据设备编号检索对应的标准检修处置规程。
-    """
     records = SOP_KNOWLEDGE_BASE.get(device_id, [])
     if not records:
         return{
@@ -111,4 +176,4 @@ def search_maintenance_sop(device_id: str, query: str = "") -> Dict[str, Any]:
         "safety_warning": matched_sop["safety_warning"]
     }
 # 将工具注册为一个全局列表供大模型绑定使用
-AVAILABLE_TOOLS = [get_device_telemetry, create_work_order, send_sms_alert, search_maintenance_sop]
+# AVAILABLE_TOOLS = [get_device_telemetry, create_work_order, send_sms_alert, search_maintenance_sop]
