@@ -1,10 +1,12 @@
 import json
 from typing import Any
-from google.genai import types
+# from google.genai import types
 from app.core.config  import ai_client
 import app.tools.factory_tools
 from app.tools.registry import tool_registry
 from app.db.session_dao import SessionDAO
+from app.providers.factory import LLMProviderFactory
+from app.providers.base_provider import ToolCallIntent
 
 # 全局会话记忆池、基于 session_id 缓存各会话的活跃 Chat 实例
 SESSION_CHATS: dict[str, any] = {}
@@ -55,7 +57,7 @@ class FactoryAgentService:
             )
         return SESSION_CHATS[session_id]
     @staticmethod
-    async def run_dispatch_loop(user_prompt:str, session_id:str = "default_session"):
+    async def run_dispatch_loop(user_prompt:str, session_id:str = "default_session", provider_type: str="gemini"):
         """
         核心调度中枢：基于 Tool Registry 的自愈式流式分发引擎
         """
@@ -66,59 +68,59 @@ class FactoryAgentService:
         elif session["title"] in ["新排查会话", "string"]:
             # 首轮智能标题提取：自动以提问前 20 字更新标题
             SessionDAO.update_session_title(session_id, user_prompt[:20])
-        # 取出或恢复上下文实例 、不再每次都新建chat，而是从会话池中取出该session的活跃chat
-        chat = FactoryAgentService.get_or_create_chat(session_id)
-        # C. 随后安全地将本次用户提问写入数据库
+
+        # 从工厂获取指定的大模型供应商 (Gemini 或 Local)
+        provider = LLMProviderFactory.get_provider(provider_type)
+        db_messages = SessionDAO.get_messages(session_id)
+        llm_session = provider.get_or_create_session(
+            session_id=session_id,
+            system_instruction=FDE_SYSTEM_INSTRUCTION,
+            history_messages=db_messages
+        )
+        # 4. 记录本次用户提问到数据库审计表
         SessionDAO.save_message(session_id=session_id, role="user", content=user_prompt)
-        # 循环控制：设置 max_turns 熔断保护，防止模型陷入死循环（WLB 保障）
+
         max_turns = 5
         turn = 0
-        current_input:Any = user_prompt
+        current_input: Any = user_prompt # 第 1 轮是用户文本，第 2+ 轮是工具结果列表
         full_assistant_text = ""
         recorded_tool_calls: List[Dict[str, Any]] = []
         try:
             while turn < max_turns:
                 turn += 1
-                response_stream = await chat.send_message_stream(current_input)
-                pending_tool_calls = []
+                response_stream = llm_session.send_message_stream(current_input)
+                pending_tool_calls: List[ToolCallIntent] = []
                 async for chunk in response_stream:
-                    # 拦截模型提出的所有工具调用意图
-                    if chunk.function_calls:
-                        for call in chunk.function_calls:
-                            call_name = call.name
-                            call_args = dict(call.args)
-                            pending_tool_calls.append((call_name, call_args))
+                    if chunk.tool_calls:
+                        for intent in chunk.tool_calls:
+                            pending_tool_calls.append(intent)
                             recorded_tool_calls.append({
-                                "tool_name": call_name,
-                                "arguments": call_args
+                                "tool_name": intent.tool_name,
+                                "arguments": intent.arguments
                             })
-                            # SSE 实时通知前端：升起对应的底层调度雷达卡片
-                            tool_event_payload = json.dumps({
-                                "tool_name": call_name,
-                                "arguments": call_args
-                            },ensure_ascii=False)
-                            yield f"event: tool_call\ndata: {tool_event_payload}\n\n"
+                        # SSE 通知前端雷达卡片
+                        payload = json.dumps({
+                            "tool_name": intent.tool_name,
+                            "arguments": intent.arguments
+                        }, ensure_ascii=False)
+                        yield f"event: tool_call\ndata: {payload}\n\n"
                     # 拦截普通分析文本，流式推送打字机效果
-                    text_val = ''
-                    try:
-                        text_val = chunk.text
-                    except Exception:
-                        pass
-                    if text_val:
-                        data = json.dumps({"text": text_val},ensure_ascii=False)
-                        yield f"event: delta\ndata: {data}\n\n"
-                    # 如果这一轮流式结束后，模型没有发起任何工具调用，说明思考和输出完全结束，退出循环
+                    if chunk.delta_text:
+                        full_assistant_text += chunk.delta_text
+                        payload = json.dumps({"text": chunk.delta_text}, ensure_ascii=False)
+                        yield f"event: delta\ndata: {payload}\n\n"
+                # 如果这一轮流式结束后，模型没有发起任何工具调用，说明思考和输出完全结束，退出循环
                 if not pending_tool_calls:
                     break
                 # 阶段 3（核心突破）：本地执行物理操作，并将真实结果打包回填给 Gemini 大脑！统一分发调度并回填结果
                 tool_responses = []
-                for call_name, call_args in pending_tool_calls:
-                    tool_result, part = await tool_registry.dispatch(call_name, call_args)
+                for intent in pending_tool_calls:
+                    tool_result = await tool_registry.dispatch(intent.tool_name, intent.arguments)
                     # 若该工具生成了 Generative UI 标记（如时序看板），直接通过 delta 推给前端
                     if tool_result.display_text:
-                        data_payload = json.dumps({"text": tool_result.display_text}, ensure_ascii=False)
-                        yield f"event: delta\ndata: {data_payload}\n\n"
-                    tool_responses.append(part)
+                        ui_payload = json.dumps({"text": tool_result.display_text}, ensure_ascii=False)
+                        yield f"event: delta\ndata: {ui_payload}\n\n"
+                    tool_responses.append((intent, tool_result))
                 current_input = tool_responses
         finally:
             # 流式结束后、安全将助手回复与工具轨迹落库

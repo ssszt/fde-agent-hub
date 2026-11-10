@@ -22,8 +22,9 @@ async def dispatch_agent_task(req:AgentTaskRequest):
 async def dispatch_agent_task_stream(res: AgentTaskRequest):
     try:
         session_id = res.session_id or "default_session"
+        provider = res.provider or "gemini"
         return StreamingResponse(
-            FactoryAgentService.run_dispatch_loop(res.prompt, session_id=session_id),
+            FactoryAgentService.run_dispatch_loop(res.prompt, session_id=session_id, provider_type=provider),
             media_type="text/event-stream"
         )
     except Exception as e:

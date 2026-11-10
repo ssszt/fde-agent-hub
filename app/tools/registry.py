@@ -90,7 +90,7 @@ class ToolRegistry:
     ]
     return [types.Tool(function_declarations=declarations)]
 
-  async def dispatch(self, tool_name:str,arguments: Dict[str, Any]) -> tuple[ToolResult, types.Part]:
+  async def dispatch(self, tool_name:str,arguments: Dict[str, Any]) -> ToolResult:
     """
     统一分发执行与安全防波堤 (Error Boundary)
     执行逻辑：
@@ -98,7 +98,7 @@ class ToolRegistry:
     2.兼容执行异步或同步函数
     3.自动适配返回值，支持裸数据与定制ToolResult
     4.统一拦截异常并包装为降级回执回填给大模型
-    5.自动组装 Gemini genai 的types.Part.from_function_response。
+    # 5.自动组装 Gemini genai 的types.Part.from_function_response。
     """
     if tool_name not in self._tools:
       err_msg = f"未注册的工具：'{tool_name}',请确认工具名称是否正确"
@@ -107,11 +107,11 @@ class ToolRegistry:
         is_error=True,
         error_message=err_msg
       )
-      part = types.Part.from_function_response(
-        name=tool_name,
-        response={'result': tool_result.result_data }
-      )
-      return tool_result, part
+      # part = types.Part.from_function_response(
+      #   name=tool_name,
+      #   response={'result': tool_result.result_data }
+      # )
+      # return tool_result, part
     tool_def = self._tools[tool_name]
     try:
       # 兼容异步与同步函数
