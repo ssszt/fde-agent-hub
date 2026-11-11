@@ -47,19 +47,19 @@ class GeminiSession(BaseLLMSession):
         return
       gemini_input = gemini_parts
       # 调用底层流式通信
-      response_stream = await self._chat.send_message_stream(gemini_input)
-      async for chunk in response_stream:
-        tool_intents: List[ToolCallIntent] = []
-        
-        # 1.拦截模型发起的工具调用
-        if chunk.function_calls:
-          for call in chunk.function_calls:
-            tool_intents.append(
-              ToolCallIntent(
-                tool_name= call.name,
-                arguments= dict(call.args)
-              )
+    response_stream = await self._chat.send_message_stream(gemini_input)
+    async for chunk in response_stream:
+      tool_intents: List[ToolCallIntent] = []
+      
+      # 1.拦截模型发起的工具调用
+      if chunk.function_calls:
+        for call in chunk.function_calls:
+          tool_intents.append(
+            ToolCallIntent(
+              tool_name= call.name,
+              arguments= dict(call.args)
             )
+          )
       # 2.提取文本增量
       text_val = ''
       try:
@@ -107,7 +107,7 @@ class GeminiProvider(BaseLLMProvider):
           )
       # 🛡️ 防御性守卫：Gemini 要求 history 必须以 model 结尾（或者为空）
       # 若历史最后一条是不幸悬空的 user，将其剔除以确保模型交替律不报错
-      if rehydrated_history and rehydrated_history[-1].role == "user":
+      while rehydrated_history and rehydrated_history[-1].role == "user":
         rehydrated_history.pop()
     
     config = types.GenerateContentConfig(

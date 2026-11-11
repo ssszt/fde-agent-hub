@@ -102,7 +102,7 @@ class ToolRegistry:
     """
     if tool_name not in self._tools:
       err_msg = f"未注册的工具：'{tool_name}',请确认工具名称是否正确"
-      tool_result = ToolResult(
+      return ToolResult(
         result_data={"status": "error", "error_type": "ToolNotFound", "message": err_msg},
         is_error=True,
         error_message=err_msg
@@ -144,12 +144,12 @@ class ToolRegistry:
     else:
       response_payload = {"result": tool_result.result_data}
 
-    part = types.Part.from_function_response(
-      name=tool_name,
-      response=response_payload
-    )
+    # part = types.Part.from_function_response(
+    #   name=tool_name,
+    #   response=response_payload
+    # )
 
-    return tool_result, part
+    return tool_result
 # 全局单例注册中心实例
 tool_registry = ToolRegistry()
 register_tool = tool_registry.register

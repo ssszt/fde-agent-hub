@@ -88,27 +88,48 @@ class FactoryAgentService:
         try:
             while turn < max_turns:
                 turn += 1
-                response_stream = llm_session.send_message_stream(current_input)
-                pending_tool_calls: List[ToolCallIntent] = []
-                async for chunk in response_stream:
-                    if chunk.tool_calls:
-                        for intent in chunk.tool_calls:
-                            pending_tool_calls.append(intent)
-                            recorded_tool_calls.append({
+                try:
+                    response_stream = llm_session.send_message_stream(current_input)
+                    pending_tool_calls: List[ToolCallIntent] = []
+                    async for chunk in response_stream:
+                        if chunk.tool_calls:
+                            for intent in chunk.tool_calls:
+                                pending_tool_calls.append(intent)
+                                recorded_tool_calls.append({
+                                    "tool_name": intent.tool_name,
+                                    "arguments": intent.arguments
+                                })
+                            # SSE 通知前端雷达卡片
+                            payload = json.dumps({
                                 "tool_name": intent.tool_name,
                                 "arguments": intent.arguments
-                            })
-                        # SSE 通知前端雷达卡片
-                        payload = json.dumps({
-                            "tool_name": intent.tool_name,
-                            "arguments": intent.arguments
-                        }, ensure_ascii=False)
-                        yield f"event: tool_call\ndata: {payload}\n\n"
-                    # 拦截普通分析文本，流式推送打字机效果
-                    if chunk.delta_text:
-                        full_assistant_text += chunk.delta_text
-                        payload = json.dumps({"text": chunk.delta_text}, ensure_ascii=False)
-                        yield f"event: delta\ndata: {payload}\n\n"
+                            }, ensure_ascii=False)
+                            yield f"event: tool_call\ndata: {payload}\n\n"
+                        # 拦截普通分析文本，流式推送打字机效果
+                        if chunk.delta_text:
+                            full_assistant_text += chunk.delta_text
+                            payload = json.dumps({"text": chunk.delta_text}, ensure_ascii=False)
+                            yield f"event: delta\ndata: {payload}\n\n"
+                except Exception as llm_err:
+                    if provider.provider_name == "gemini":
+                        warn_msg = (
+                            f"\n\n> ⚠️ **[算力容灾自愈系统]** 检测到云端 Gemini 服务受阻 (`{str(llm_err)}`)，"
+                            f"已自动无感熔断切换至 **【本地私有化应急引擎】** 接管排查...\n\n"
+                        )
+                        full_assistant_text += warn_msg
+                        yield f"event: delta\ndata: {json.dumps({'text': warn_msg}, ensure_ascii=False)}\n\n"
+                        # 现场热切换供应商与会话实例
+                        provider = LLMProviderFactory.get_provider("local")
+                        llm_session = provider.get_or_create_session(
+                            session_id=session_id,
+                            system_instruction=FDE_SYSTEM_INSTRUCTION,
+                            history_messages=db_messages
+                        )
+                        # 回退步数，用新引擎重新执行本轮推理
+                        turn -= 1
+                        continue
+                    else:
+                        raise llm_err
                 # 如果这一轮流式结束后，模型没有发起任何工具调用，说明思考和输出完全结束，退出循环
                 if not pending_tool_calls:
                     break

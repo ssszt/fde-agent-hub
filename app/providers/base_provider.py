@@ -23,7 +23,7 @@ class StreamChunk:
   """
   统一的流式输出增量块
   """
-  delta_str: str = "s"
+  delta_text: str = ""
   tool_calls: List[ToolCallIntent] = field(default_factory=list)
   raw_chunk: Any =  None # 保留底层原始响应供调试
 
