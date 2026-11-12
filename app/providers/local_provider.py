@@ -162,7 +162,13 @@ class LocalSession(BaseLLMSession):
     if last_msg["role"] == "user":
       prompt = last_msg["content"]
       # 提取设备编号（例如 DEV-001 或 DEV-003）
-      target_dev = "DEV-003" if "DEV-003" in prompt or "3号机" in prompt else "DEV-001"
+      match = re.search(r"DEV-\d+", prompt.upper())
+      if match:
+        target_dev = match.group(0)
+      elif "3号机" in prompt:
+        target_dev = "DEV-003"
+      else:
+        target_dev = "DEV-001"
       
       # 模拟打字机流式输出前置思考
       yield StreamChunk(delta_text=f"【本地私有离线引擎 (Local Qwen2.5)】正在接入车间局域网遥测总线...\n检测到对设备 {target_dev} 的排查诉求，立即调用底层时序查库工具。")

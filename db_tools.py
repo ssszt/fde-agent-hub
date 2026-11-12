@@ -66,6 +66,56 @@ def resolve_work_order(order_id: str) -> bool:
     updated = cursor.rowcount > 0
     conn.close()
     return updated
+
+def get_devices_health_summary() -> dict:
+    """聚合每台设备的最新遥测快照与未闭环工单数，供监控驾驶舱与顶栏角标使用"""
+    conn = sqlite3.connect('factory_data.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 1.查询每台设备最新一条遥测状态
+    cursor.execute('''
+        SELECT device_id, timestamp, temperature, status 
+        FROM device_telemetry
+        WHERE id IN (
+            SELECT MAX(id) FROM device_telemetry
+            GROUP BY device_id
+        )
+    ''')
+    telemetry_rows = cursor.fetchall()
+    
+    # 2.查询每台设备当前未闭环工单数
+    cursor.execute('''
+        SELECT device_id, COUNT(*) AS cnt
+        FROM work_orders
+        WHERE status != 'RESOLVED'
+        GROUP BY device_id
+    ''')
+    open_order_map = {row["device_id"]: row["cnt"] for row in cursor.fetchall()}
+    conn.close()
+    
+    devices = []
+    abnormal_count = 0
+    for row in telemetry_rows:
+        dev_id = row["device_id"]
+        status = row["status"]
+        if status != "NORMAL":
+            abnormal_count += 1
+        devices.append({
+            "device_id": dev_id,
+            "temperature": row["temperature"],
+            "status": status,
+            "last_updated": row["timestamp"],
+            "open_orders": open_order_map.get(dev_id, 0)
+        })
+    return {
+        "devices": devices,
+        "summary": {
+            "total_devices": len(devices),
+            "abnormal_devices": abnormal_count,
+            "open_work_orders": sum(open_order_map.values()),
+        },
+    }
 def query_device_history(device_id: str, limit: int = 5) -> str:
     """
     根据设备 ID 查询该设备的近期运行温度和状态历史。
