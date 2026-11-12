@@ -105,7 +105,8 @@ class LocalSession(BaseLLMSession):
       async with httpx.AsyncClient(timeout=2.0) as client:
         resp = await client.get(f"{self.base_url}/api/tags")
         if resp.status_code == 200:
-          ollama_online = True
+          models = resp.json().get("models", [])
+          ollama_online = any("qwen2.5:7b" in m.get("name", "") for m in models)
     except Exception:
       ollama_online = False
     
@@ -113,8 +114,8 @@ class LocalSession(BaseLLMSession):
       async for chunk in self._stream_from_real_ollama(openai_tools):
         yield chunk
     else:
-       # 若本地暂未开启 GPU/Ollama，启动离线车间引擎完成自主排查
-       async for chunk in self._stream_from_offline_engine():
+      # 若本地暂未开启 GPU/Ollama，启动离线车间引擎完成自主排查
+      async for chunk in self._stream_from_offline_engine():
         yield chunk
   
   async def _stream_from_real_ollama(self, tools: List[Dict[str, Any]]) -> AsyncGenerator[StreamChunk, None]:
@@ -169,56 +170,80 @@ class LocalSession(BaseLLMSession):
       
       # 发起工具调用：告诉外部调度中枢去执行 query_device_history
       yield StreamChunk(
-          tool_calls=[
-              ToolCallIntent(
-                  tool_name="query_device_history",
-                  arguments={"device_id": target_dev, "limit": 5}
-              )
-          ]
+        tool_calls=[
+          ToolCallIntent(
+            tool_name="query_device_history",
+            arguments={"device_id": target_dev, "limit": 5}
+          )
+        ]
       )
     
     # 场景 2：如果最后一条是工具查出来的温度数据回填
     elif last_msg["role"] == "tool":
-      tool_data_raw = last_msg["content"]
-      try:
-          tool_data = json.loads(tool_data_raw)
-      except Exception:
-          tool_data = {}
-      
+      # 只截取最近一次用户提问之后的本轮调用轨迹，避免多轮对话互相干扰
+      last_user_idx = max(
+        (i for i, m in enumerate(self.messages) if m.get("role") == "user"),
+        default=0
+      )
+      current_turn_msgs = self.messages[last_user_idx:]
+      # 从本轮查库回执中提取设备号与历史记录列表
+      device_id = "DEV-001"
+      records: List[Dict[str, Any]] = []
+      for m in current_turn_msgs:
+        if m.get("role") == "tool" and m.get("name") == "query_device_history":
+          try:
+            history_data = json.loads(m["content"])
+            if isinstance(history_data, dict):
+              device_id = history_data.get("device_id", device_id)
+              records = history_data.get("history", [])
+            elif isinstance(history_data, list):
+              records = history_data
+          except Exception:
+            pass
       # 分析时序数据中是否存在过热 (>85°C)
-      is_overheat = False
-      if isinstance(tool_data, list):
-          is_overheat = any(item.get("temperature", 0) > 85.0 for item in tool_data)
-      
+      is_overheat = any(
+        item.get("temperature", 0) > 85.0 or item.get("status") == "CRITICAL_FAULT"
+        for item in records
+        if isinstance(item, dict)
+      )  
       if is_overheat:
           # 检查是否已经查过 SOP，若没查过则发起维保 SOP 查询
-          has_sop = any(m.get("name") == "search_maintenance_sop" for m in self.messages if m.get("role") == "tool")
+          has_sop = any(m.get("name") == "search_maintenance_sop" for m in current_turn_msgs if m.get("role") == "tool")
           if not has_sop:
               yield StreamChunk(delta_text="\n\n⚠️ 本地模型分析发现温度超标（超过 85°C 工业警戒线）！立即调取本地离线 SOP 维保规程...")
               yield StreamChunk(
-                  tool_calls=[
-                      ToolCallIntent(
-                          tool_name="search_maintenance_sop",
-                          arguments={"fault_keyword": "过热"}
-                      )
-                  ]
+                tool_calls=[
+                  ToolCallIntent(
+                    tool_name="search_maintenance_sop",
+                    arguments={"device_id": device_id, "query": "高温超标应急排查"}
+                  )
+                ]
               )
               return
           
           # 检查是否已派单
-          has_order = any(m.get("name") == "create_work_order" for m in self.messages if m.get("role") == "tool")
+          has_order = any(m.get("name") == "create_work_order" for m in current_turn_msgs if m.get("role") == "tool") 
           if not has_order:
-              yield StreamChunk(delta_text="\n\n已研读维保规程，正在派发紧急处理工单...")
+              yield StreamChunk(delta_text=f"\n\n已研读 {device_id} 维保规程，正在派发紧急处理工单...")
               yield StreamChunk(
-                  tool_calls=[
-                      ToolCallIntent(
-                          tool_name="create_work_order",
-                          arguments={"device_id": "DEV-003", "reason": "温度持续超温，冷却回路异常", "priority": "EMERGENCY"}
-                      )
-                  ]
+                tool_calls=[
+                  ToolCallIntent(
+                    tool_name="create_work_order",
+                    arguments={"device_id": device_id, "reason": f"{device_id}温度持续超温，冷却回路异常", "priority": "EMERGENCY"}
+                  )
+                ]
               )
               return
-      
+      # 3. 读取本轮真实生成的工单号（若有），输出终局报告
+      order_id = "未触发派单（设备运行平稳）"
+      for m in current_turn_msgs:
+        if m.get("role") == "tool" and m.get("name") == "create_work_order":
+          try:
+            order_data = json.loads(m["content"])
+            order_id = order_data.get("order_id", order_id)
+          except Exception:
+            pass
+  
       # 终局分析报告
       conclusion = (
           "\n\n### 🏁 【本地私有化引擎排查结论】\n"
@@ -227,8 +252,8 @@ class LocalSession(BaseLLMSession):
           "3. **闭环状态**：已按照 SOP 规程完成风险处置与工单登记。"
       )
       for char in conclusion:
-          yield StreamChunk(delta_text=char)
-          await asyncio.sleep(0.01)
+        yield StreamChunk(delta_text=char)
+        await asyncio.sleep(0.01)
 class LocalProvider(BaseLLMProvider):
   """
   【本地私有化大模型供应商适配器】

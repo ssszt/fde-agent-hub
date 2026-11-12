@@ -1,9 +1,10 @@
+from datetime import datetime
 import json
 import random
 from typing import Dict, Any
 from google.genai import types
 
-from db_tools import query_device_history
+from db_tools import query_device_history, insert_work_order
 from app.tools.registry import register_tool, ToolResult
 # ==========================================
 # 工具 1：物理时序遥测查库工具 (适配层)
@@ -63,15 +64,18 @@ def query_device_history_tool(device_id: str, limit: int=5) -> ToolResult:
         required=["device_id", "reason"]
     )
 )
+
 def create_work_order(device_id: str, reason: str, priority: str="EMERGENCY") -> Dict[str, Any]:
-    order_id = f"WO-20261003-{random.randint(100, 999)}"
+    order_id = f"WO-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
+    record = insert_work_order(
+        order_id=order_id,
+        device_id=device_id,
+        reason=reason,
+        priority=priority
+    )
     return {
-        "order_id": order_id,
-        "device_id": device_id,
-        "status": "DISPATCHED",
-        "priority": priority,
-        "reason": reason,
-        "message": f"工单 {order_id} 已成功分发至现场值班工程师"
+        **record,
+        "message": f"工单 {order_id} 已真实落库并分发至现场值班工程师"
     }
 # ==========================================
 # 工具 3：现场运维短信告警工具

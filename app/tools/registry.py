@@ -107,11 +107,6 @@ class ToolRegistry:
         is_error=True,
         error_message=err_msg
       )
-      # part = types.Part.from_function_response(
-      #   name=tool_name,
-      #   response={'result': tool_result.result_data }
-      # )
-      # return tool_result, part
     tool_def = self._tools[tool_name]
     try:
       # 兼容异步与同步函数
@@ -138,17 +133,6 @@ class ToolRegistry:
         is_error=True,
         error_message=err_msg
       )
-    # 构造回填给Gemini大脑的标准part
-    if isinstance(tool_result.result_data, dict) and "result" in tool_result.result_data:
-      response_payload = tool_result.result_data
-    else:
-      response_payload = {"result": tool_result.result_data}
-
-    # part = types.Part.from_function_response(
-    #   name=tool_name,
-    #   response=response_payload
-    # )
-
     return tool_result
 # 全局单例注册中心实例
 tool_registry = ToolRegistry()

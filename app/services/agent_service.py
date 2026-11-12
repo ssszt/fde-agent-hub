@@ -1,7 +1,5 @@
 import json
-from typing import Any
-# from google.genai import types
-from app.core.config  import ai_client
+from typing import Any, Dict, List
 import app.tools.factory_tools
 from app.tools.registry import tool_registry
 from app.db.session_dao import SessionDAO
@@ -9,7 +7,6 @@ from app.providers.factory import LLMProviderFactory
 from app.providers.base_provider import ToolCallIntent
 
 # 全局会话记忆池、基于 session_id 缓存各会话的活跃 Chat 实例
-SESSION_CHATS: dict[str, any] = {}
 FDE_SYSTEM_INSTRUCTION=(
     "你是一个工业物联网现场交付工程师专家助手（FDE Agent）。 \n"
     "【标准排查作业闭环流程】\n"
@@ -22,40 +19,6 @@ FDE_SYSTEM_INSTRUCTION=(
 )
 
 class FactoryAgentService:
-    @staticmethod
-    def get_or_create_chat(session_id):
-        # 若内存中没有该会话，自动从 SQLite 数据底座回放并重构 Gemini 历史上下文
-        if session_id not in SESSION_CHATS:
-            db_messages = SessionDAO.get_messages(session_id)
-            rehydrated_history: List[types.Content] = []
-
-            for msg in db_messages:
-                # 转换角色：用户是 "user"，助手在 Gemini SDK 中需映射为 "model"
-                gemini_role = "user" if msg["role"] == "user" else "model"
-                if msg["content"]:
-                    rehydrated_history.append(
-                        types.Content(
-                            role=gemini_role,
-                            parts=[types.Part.from_text(text=msg["content"])]
-                        )
-                    )
-            # 🛡️ 防御性守卫：Gemini 要求 history 必须以 model 结尾（或者为空）
-            # 若历史最后一条不幸是悬空的 user（例如上次进程在中途崩溃未生成回复），将其弹出以保证严格交替
-            if rehydrated_history and rehydrated_history[-1].role == "user":
-                rehydrated_history.pop()
-
-            config=types.GenerateContentConfig(
-                system_instruction = FDE_SYSTEM_INSTRUCTION,
-                tools=tool_registry.get_gemini_tools(),
-                temperature=0.2,
-            )
-            # 注入历史回放，实现断点续接记忆唤醒
-            SESSION_CHATS[session_id] = ai_client.aio.chats.create(
-                model="gemini-2.5-flash", 
-                config=config,
-                history= rehydrated_history if rehydrated_history else None
-            )
-        return SESSION_CHATS[session_id]
     @staticmethod
     async def run_dispatch_loop(user_prompt:str, session_id:str = "default_session", provider_type: str="gemini"):
         """
@@ -139,6 +102,7 @@ class FactoryAgentService:
                     tool_result = await tool_registry.dispatch(intent.tool_name, intent.arguments)
                     # 若该工具生成了 Generative UI 标记（如时序看板），直接通过 delta 推给前端
                     if tool_result.display_text:
+                        full_assistant_text += tool_result.display_text
                         ui_payload = json.dumps({"text": tool_result.display_text}, ensure_ascii=False)
                         yield f"event: delta\ndata: {ui_payload}\n\n"
                     tool_responses.append((intent, tool_result))
