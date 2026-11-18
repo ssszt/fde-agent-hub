@@ -6,6 +6,7 @@ from app.db.session_dao import SessionDAO                  # 👈 2. 导入 DAO
 from app.api.work_order_router import router as work_order_router
 from db_tools import init_work_orders_table
 from app.api.device_router import router as device_router
+from app.api.knowledge_router import router as knowledge_router
 
 # 在应用启动前，无感确保表结构已就绪
 SessionDAO.init_tables() 
@@ -31,6 +32,7 @@ app.include_router(agent_router)
 app.include_router(session_router)                        # 👈 4. 挂载会话管理路由
 app.include_router(work_order_router)                     # 👈 5. 挂载工单管理路由
 app.include_router(device_router)                       # 👈 6. 挂载设备管理路由
+app.include_router(knowledge_router)
 
 
 
