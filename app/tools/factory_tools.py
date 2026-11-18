@@ -6,6 +6,7 @@ from google.genai import types
 
 from db_tools import query_device_history, insert_work_order
 from app.tools.registry import register_tool, ToolResult
+from app.services.knowledge_service import KnowledgeService
 # ==========================================
 # 工具 1：物理时序遥测查库工具 (适配层)
 # ==========================================
@@ -143,7 +144,7 @@ SOP_KNOWLEDGE_BASE = {
 
 @register_tool(
     name="search_maintenance_sop",
-    description="在企业私有知识库中检索指定设备的维保标准作业规程(SOP)、应急排查处置步骤与根因分析手册。当设备发生异常或严重故障时，必须调用该工具查询精准排查指南。",
+    description="在企业私有知识库(ChromaDB)中向量检索指定设备的维保标准作业规程(SOP)、应急排查处置步骤与根因分析手册。当设备发生异常或严重故障时，必须调用该工具查询精准排查指南。",
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -159,25 +160,53 @@ SOP_KNOWLEDGE_BASE = {
         required=["device_id"]
     )
 )
-def search_maintenance_sop(device_id: str, query: str = "") -> Dict[str, Any]:
+def search_maintenance_sop(device_id: str, query: str = "") -> ToolResult:
+    search_query = query.strip() if query.strip() else f"{device_id}冷却系统高温异常与故障码排查规程"
+    citations = []
+    try:
+        citations = KnowledgeService.search_similar_chunks(
+            query=search_query,
+            device_id=device_id,
+            top_k=2,
+            min_similarity=0.4
+        )
+    except Exception as e:
+        print(f"ChromaDB 检索异常: {e}")
+    if citations:
+        context_text = "\n\n".join([f"【章节：{c['section']} 置信度：{c['similarity']}】\n{c['content']}" for c in citations])
+        display_md = (
+            f"\n\n> 📚 **[RAG 知识库检索成功]** 命中手册 `{citations[0]['source']}`，"
+            f"召回 {len(citations)} 个核心规程片段 (最高置信度: `{citations[0]['similarity']}`)\n\n"
+        )
+        return ToolResult(
+            result_data={
+                "found": True,
+                "device_id": device_id,
+                "source": citations[0]["source"],
+                "citations": citations,
+                "sop_content": context_text
+            },
+            display_text=display_md
+        )
     records = SOP_KNOWLEDGE_BASE.get(device_id, [])
-    if not records:
-        return{
+    if records:
+        matched_sop = records[0]
+        return ToolResult(
+            result_data={
+                "found": True,
+                "device_id": device_id,
+                "sop_id": matched_sop["sop_id"],
+                "title": matched_sop["title"],
+                "action_steps": matched_sop["action_steps"],
+                "safety_warning": matched_sop["safety_warning"]
+            },
+            display_text=f"\n\n> ℹ️ **[预设 SOP 库]** 命中设备 `{device_id}` 维保规则\n\n"
+        )
+    return ToolResult(
+        result_data={
             "found": False,
             "device_id": device_id,
             "message": f"未在知识库中检索到设备 {device_id} 的专用维护规程"
-        }
-     # 模拟精确命中该设备的应急排查 SOP
-    matched_sop = records[0]
-    return {
-        "found": True,
-        "device_id": device_id,
-        "sop_id": matched_sop["sop_id"],
-        "title": matched_sop["title"],
-        "trigger_condition": matched_sop["trigger_condition"],
-        "root_cause": matched_sop["root_cause_analysis"],
-        "action_steps": matched_sop["action_steps"],
-        "safety_warning": matched_sop["safety_warning"]
-    }
-# 将工具注册为一个全局列表供大模型绑定使用
-# AVAILABLE_TOOLS = [get_device_telemetry, create_work_order, send_sms_alert, search_maintenance_sop]
+        },
+        display_text=f"\n\n> ⚠️ **[知识库未命中]** 未找到设备 `{device_id}` 的专属规程\n\n"
+    )

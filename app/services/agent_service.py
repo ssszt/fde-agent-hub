@@ -101,6 +101,9 @@ class FactoryAgentService:
                 for intent in pending_tool_calls:
                     tool_result = await tool_registry.dispatch(intent.tool_name, intent.arguments)
                     # 若该工具生成了 Generative UI 标记（如时序看板），直接通过 delta 推给前端
+                    if isinstance(tool_result.result_data,dict) and "citations" in tool_result.result_data:
+                        cit_payload = json.dumps({"citations": tool_result.result_data['citations']}, ensure_ascii=False)
+                        yield f"event: citation\ndata: {cit_payload}\n\n"
                     if tool_result.display_text:
                         full_assistant_text += tool_result.display_text
                         ui_payload = json.dumps({"text": tool_result.display_text}, ensure_ascii=False)
